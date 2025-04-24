@@ -1,29 +1,24 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
+﻿namespace Nop.Core.Domain.Customers;
 
-namespace Nop.Core.Domain.Customers
+/// <summary>
+/// Customer activated event
+/// </summary>
+public partial class CustomerActivatedEvent
 {
     /// <summary>
-    /// Customer activated event
+    /// Ctor
     /// </summary>
-    public class CustomerActivatedEvent
+    /// <param name="customer">customer</param>
+    public CustomerActivatedEvent(Customer customer)
     {
-        /// <summary>
-        /// Ctor
-        /// </summary>
-        /// <param name="customer">customer</param>
-        public CustomerActivatedEvent(Customer customer)
-        {
-            Customer = customer;
-        }
+        Customer = customer;
+    }
 
-        /// <summary>
-        /// Customer
-        /// </summary>
-        public Customer Customer
-        {
-            get;
-        }
+    /// <summary>
+    /// Customer
+    /// </summary>
+    public Customer Customer
+    {
+        get;
     }
 }

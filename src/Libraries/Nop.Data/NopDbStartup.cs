@@ -1,76 +1,84 @@
-﻿using System;
-using System.Linq;
+﻿using FluentMigrator;
 using FluentMigrator.Runner;
-using LinqToDB.Data;
-using LinqToDB.Mapping;
+using FluentMigrator.Runner.Conventions;
+using FluentMigrator.Runner.Initialization;
+using FluentMigrator.Runner.Processors;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using Nop.Core.Caching;
+using Nop.Core.Configuration;
 using Nop.Core.Infrastructure;
 using Nop.Data.Extensions;
 using Nop.Data.Migrations;
 
-namespace Nop.Data
+namespace Nop.Data;
+
+/// <summary>
+/// Represents object for the configuring DB context on application startup
+/// </summary>
+public partial class NopDbStartup : INopStartup
 {
     /// <summary>
-    /// Represents object for the configuring DB context on application startup
+    /// Add and configure any of the middleware
     /// </summary>
-    public class NopDbStartup : INopStartup
+    /// <param name="services">Collection of service descriptors</param>
+    /// <param name="configuration">Configuration of the application</param>
+    public void ConfigureServices(IServiceCollection services, IConfiguration configuration)
     {
-        /// <summary>
-        /// Add and configure any of the middleware
-        /// </summary>
-        /// <param name="services">Collection of service descriptors</param>
-        /// <param name="configuration">Configuration of the application</param>
-        public void ConfigureServices(IServiceCollection services, IConfiguration configuration)
-        {
-            var mappingBuilder = new FluentMappingBuilder(NopDataConnection.AdditionalSchema);
-            
-            //find database mapping configuration by other assemblies
-            var typeFinder = new AppDomainTypeFinder();
-            var typeConfigurations = typeFinder.FindClassesOfType<IMappingConfiguration>().ToList();
+        var typeFinder = Singleton<ITypeFinder>.Instance;
+        var mAssemblies = typeFinder.FindClassesOfType<MigrationBase>()
+            .Select(t => t.Assembly)
+            .Where(assembly => !assembly.FullName.Contains("FluentMigrator.Runner"))
+            .Distinct()
+            .ToArray();
 
-            foreach (var typeConfiguration in typeConfigurations)
-            {
-                var mappingConfiguration = (IMappingConfiguration)Activator.CreateInstance(typeConfiguration);
-                mappingConfiguration.ApplyConfiguration(mappingBuilder);
-            }
-
-            //further actions are performed only when the database is installed
-            if (!DataSettingsManager.DatabaseIsInstalled)
-                return;
-
-            DataConnection.DefaultSettings = Singleton<DataSettings>.Instance;
-
-            MappingSchema.Default.SetConvertExpression<string, Guid>(strGuid => new Guid(strGuid));
-
-            services
-                // add common FluentMigrator services
-                .AddFluentMigratorCore()
-                .ConfigureRunner(rb => rb.SetServer()
-                    .WithVersionTable(new MigrationVersionInfo())
+        services
+            // add common FluentMigrator services
+            .AddFluentMigratorCore()
+            .AddScoped<IProcessorAccessor, NopProcessorAccessor>()
+            // set accessor for the connection string
+            .AddScoped<IConnectionStringAccessor>(x => DataSettingsManager.LoadSettings())
+            .AddScoped<IMigrationManager, MigrationManager>()
+            .AddSingleton<IConventionSet, NopConventionSet>()
+            .ConfigureRunner(rb =>
+                rb.WithVersionTable(new MigrationVersionInfo())
+                    .AddNopDbEngines()
                     // define the assembly containing the migrations
-                    .ScanIn(typeConfigurations.Select(p => p.Assembly).Distinct().ToArray()).For.Migrations());
-        }
+                    .ScanIn(mAssemblies).For.Migrations()
+                    .SetCommandTimeout());
 
-        /// <summary>
-        /// Configure the using of added middleware
-        /// </summary>
-        /// <param name="application">Builder for configuring an application's request pipeline</param>
-        public void Configure(IApplicationBuilder application)
-        {
-            //further actions are performed only when the database is installed
-            if (!DataSettingsManager.DatabaseIsInstalled)
-                return;
+        services.AddTransient(p => new Lazy<IVersionLoader>(p.GetRequiredService<IVersionLoader>()));
 
-            EngineContext.Current.Resolve<ILocker>().PerformActionWithLock(typeof(NopDbStartup).FullName, TimeSpan.FromSeconds(300),
-                () => EngineContext.Current.Resolve<IDataProvider>().ApplyUpMigrations());
-        }
+        //data layer
+        services.AddTransient<IDataProviderManager, DataProviderManager>();
+        services.AddTransient(serviceProvider =>
+            serviceProvider.GetRequiredService<IDataProviderManager>().DataProvider);
 
-        /// <summary>
-        /// Gets order of this startup configuration implementation
-        /// </summary>
-        public int Order => 10;
+        //repositories	
+        services.AddScoped(typeof(IRepository<>), typeof(EntityRepository<>));
+
+        if (!DataSettingsManager.IsDatabaseInstalled())
+            return;
+
+        using var scope = services.BuildServiceProvider().CreateScope();
+        var runner = scope.ServiceProvider.GetRequiredService<IMigrationManager>();
+        foreach (var assembly in mAssemblies)
+            runner.ApplyUpSchemaMigrations(assembly);
     }
+
+    /// <summary>
+    /// Configure the using of added middleware
+    /// </summary>
+    /// <param name="application">Builder for configuring an application's request pipeline</param>
+    public void Configure(IApplicationBuilder application)
+    {
+        var config = Singleton<AppSettings>.Instance.Get<CacheConfig>();
+
+        LinqToDB.Common.Configuration.Linq.DisableQueryCache = config.LinqDisableQueryCache;
+    }
+
+    /// <summary>
+    /// Gets order of this startup configuration implementation
+    /// </summary>
+    public int Order => 10;
 }
